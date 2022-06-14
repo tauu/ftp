@@ -11,6 +11,9 @@ import (
 var errUnsupportedListLine = errors.New("unsupported LIST line")
 var errUnsupportedListDate = errors.New("unsupported LIST date")
 var errUnknownListEntryType = errors.New("unknown entry type")
+var errUnknownRecordFormat = errors.New("unknown record format")
+var errUnknownDataSetOrganization = errors.New("unknown dataset organization")
+var errUnknownTimeFormat = errors.New("unknown time format")
 
 type parseFunc func(string, time.Time, *time.Location) (*Entry, error)
 
@@ -215,6 +218,108 @@ func parseHostedFTPLine(line string, now time.Time, loc *time.Location) (*Entry,
 
 	// Set link count to 1 and attempt to parse as Unix.
 	return parseLsListLine(fields[0]+" 1 "+scanner.Remaining(), now, loc)
+}
+
+// parseDataSetListLine parses a dataset line in the format resported by a zOS
+// ftp server.
+func parseDataSetListLine(line string, now time.Time, loc *time.Location) (*DataSetEntry, error) {
+
+	// The first column of the line contains the volume, which can only be
+	// up to 6 characters long. As the volume name is followed by a space, there
+	// has to be one at position 7.
+	if i := strings.IndexByte(line, ' '); !(i == 6) {
+		return nil, errUnsupportedListLine
+	}
+
+	scanner := newScanner(line)
+	fields := scanner.NextFields(9)
+
+	if len(fields) < 9 {
+		return nil, errUnsupportedListLine
+	}
+
+	e := &DataSetEntry{
+		Name:   scanner.Remaining(),
+		Volume: fields[0],
+		Unit:   fields[1],
+	}
+	var err error
+	// Set the number of extension.
+	if e.Extensions, err = strconv.ParseUint(fields[3], 0, 64); err != nil {
+		return nil, err
+	}
+	// Set the used number.
+	if e.Used, err = strconv.ParseUint(fields[4], 0, 64); err != nil {
+		return nil, err
+	}
+	// Set the logical record length.
+	if e.LogicalRecordLength, err = strconv.ParseUint(fields[6], 0, 64); err != nil {
+		return nil, err
+	}
+	// Set the block size.
+	if e.BlockSize, err = strconv.ParseUint(fields[7], 0, 64); err != nil {
+		return nil, err
+	}
+
+	// Parse the RecordFormat.
+	recordFormats := map[string]RecordFormat{
+		"F":    RecordFormatFixed,
+		"FA":   RecordFormatFixedASA,
+		"FM":   RecordFormatFixedMachine,
+		"FB":   RecordFormatFixedBlock,
+		"FBA":  RecordFormatFixedBlockASA,
+		"FBM":  RecordFormatFixedBlockMachine,
+		"FBS":  RecordFormatFixedBlockStandard,
+		"FSA":  RecordFormatFixedStandardASA,
+		"FSM":  RecordFormatFixedStandardMachine,
+		"FBSA": RecordFormatFixedBlockStandardASA,
+		"FBSM": RecordFormatFixedBlockStandardMachine,
+		"V":    RecordFormatVariable,
+		"VA":   RecordFormatVariableASA,
+		"VM":   RecordFormatVariableMachine,
+		"VS":   RecordFormatVariableSpanned,
+		"VB":   RecordFormatVariableBlock,
+		"VBA":  RecordFormatVariableBlockASA,
+		"VBM":  RecordFormatVariableBlockMachine,
+		"VBS":  RecordFormatVariableBlockSpanned,
+		"VSA":  RecordFormatVariableSpannedASA,
+		"VSM":  RecordFormatVariableSpannedMachine,
+		"VBSA": RecordFormatVariableBlockSpannedASA,
+		"VBSM": RecordFormatVariableBlockSpannedMachine,
+		"U":    RecordFormatUndefined,
+		"UA":   RecordFormatUndefinedASA,
+		"UM":   RecordFormatUndefinedMachine,
+	}
+	var ok bool
+	if e.RecordFormat, ok = recordFormats[fields[5]]; !ok {
+		return nil, errUnknownRecordFormat
+	}
+	// Parse the DataSet organization.
+	dataSetOrganizations := map[string]DataSetOrganization{
+		"PS":   PhysicalSequential,
+		"PO":   PhysicalOrganized,
+		"DA":   DirectAccess,
+		"VS":   VirtualStorageAccessMethod,
+		"NV":   NonVirtualStorageAccessMethod,
+		"KSDS": KeySequencedDataSet,
+		"RRDS": RelativeRecordDataSet,
+		"ESDS": EntrySequencedDataSet,
+		"LDS":  LinearDataSet,
+	}
+	if e.DatasetOrganization, ok = dataSetOrganizations[fields[8]]; !ok {
+		return nil, errUnknownDataSetOrganization
+	}
+
+	// If the referred time is **NONE** there is no time available to be set.
+	if fields[2] != "**NONE**" {
+		referred, err := time.ParseInLocation("2006/01/02", fields[2], loc)
+		if err != nil {
+			return nil, errUnknownTimeFormat
+		}
+		e.Time = &referred
+	}
+
+	return e, nil
 }
 
 // parseListLine parses the various non-standard format returned by the LIST

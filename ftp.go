@@ -90,6 +90,76 @@ type Entry struct {
 	Time   time.Time
 }
 
+// RecordFormat denotes the format used to store records in a zOS dataset.
+// This list has been taken from the official zOS documentation.
+// https://www.ibm.com/docs/en/zos-basic-skills?topic=set-data-record-formats
+// https://www.ibm.com/docs/en/zos/2.5.0?topic=SSLTBW_2.5.0/com.ibm.zos.v2r5.cbcpx01/recfmf.htm
+// https://www.ibm.com/docs/en/zos/2.5.0?topic=SSLTBW_2.5.0/com.ibm.zos.v2r5.cbcpx01/recformat2.htm
+// https://www.ibm.com/docs/en/zos/2.5.0?topic=SSLTBW_2.5.0/com.ibm.zos.v2r5.cbcpx01/recformat3.htm
+type RecordFormat string
+
+const (
+	RecordFormatFixed                       RecordFormat = "F"
+	RecordFormatFixedASA                    RecordFormat = "FA"
+	RecordFormatFixedMachine                RecordFormat = "FM"
+	RecordFormatFixedBlock                  RecordFormat = "FB"
+	RecordFormatFixedBlockASA               RecordFormat = "FBA"
+	RecordFormatFixedBlockMachine           RecordFormat = "FBM"
+	RecordFormatFixedBlockStandard          RecordFormat = "FBS"
+	RecordFormatFixedStandardASA            RecordFormat = "FSA"
+	RecordFormatFixedStandardMachine        RecordFormat = "FSM"
+	RecordFormatFixedBlockStandardASA       RecordFormat = "FBSA"
+	RecordFormatFixedBlockStandardMachine   RecordFormat = "FBSM"
+	RecordFormatVariable                    RecordFormat = "V"
+	RecordFormatVariableASA                 RecordFormat = "VA"
+	RecordFormatVariableMachine             RecordFormat = "VM"
+	RecordFormatVariableSpanned             RecordFormat = "VS"
+	RecordFormatVariableBlock               RecordFormat = "VB"
+	RecordFormatVariableBlockASA            RecordFormat = "VBA"
+	RecordFormatVariableBlockMachine        RecordFormat = "VBM"
+	RecordFormatVariableBlockSpanned        RecordFormat = "VBS"
+	RecordFormatVariableSpannedASA          RecordFormat = "VSA"
+	RecordFormatVariableSpannedMachine      RecordFormat = "VSM"
+	RecordFormatVariableBlockSpannedASA     RecordFormat = "VBSA"
+	RecordFormatVariableBlockSpannedMachine RecordFormat = "VBSM"
+	RecordFormatUndefined                   RecordFormat = "U"
+	RecordFormatUndefinedASA                RecordFormat = "UA"
+	RecordFormatUndefinedMachine            RecordFormat = "UM"
+)
+
+// DataSetOrganization denotes how the data within a dataset can be accessed.
+// This list is taken from the official zOS documentation.
+// https://www.ibm.com/docs/en/zos/2.5.0?topic=options-data-set-organization-dsorg
+// https://www.ibm.com/docs/en/tasmsfz/2.2?topic=SSZKUS_2.2.0/com.ibm.advancedallocationmgt.doc_3.3/gloumst280.htm
+type DataSetOrganization string
+
+const (
+	PhysicalSequential            DataSetOrganization = "PS"
+	PhysicalOrganized             DataSetOrganization = "PO"
+	DirectAccess                  DataSetOrganization = "DA"
+	VirtualStorageAccessMethod    DataSetOrganization = "VS"
+	NonVirtualStorageAccessMethod DataSetOrganization = "NV"
+	KeySequencedDataSet           DataSetOrganization = "KSDS"
+	RelativeRecordDataSet         DataSetOrganization = "RRDS"
+	EntrySequencedDataSet         DataSetOrganization = "ESDS"
+	LinearDataSet                 DataSetOrganization = "LDS"
+)
+
+// DataSetEntry describe metadat of a dataset on a zOS filesystem.
+type DataSetEntry struct {
+	Name                string
+	Volume              string
+	Unit                string
+	Extensions          uint64
+	Used                uint64
+	RecordFormat        RecordFormat
+	LogicalRecordLength uint64
+	BlockSize           uint64
+	DatasetOrganization DataSetOrganization
+	Size                uint64
+	Time                *time.Time
+}
+
 // Response represents a data-connection
 type Response struct {
 	conn   net.Conn
@@ -637,6 +707,44 @@ func (c *ServerConn) List(path string) (entries []*Entry, err error) {
 		cmd = "LIST"
 		parser = parseListLine
 	}
+
+	space := " "
+	if path == "" {
+		space = ""
+	}
+	conn, err := c.cmdDataConnFrom(0, "%s%s%s", cmd, space, path)
+	if err != nil {
+		return nil, err
+	}
+
+	var errs *multierror.Error
+
+	r := &Response{conn: conn, c: c}
+
+	scanner := bufio.NewScanner(c.options.wrapStream(r))
+	now := time.Now()
+	for scanner.Scan() {
+		entry, errParse := parser(scanner.Text(), now, c.options.location)
+		if errParse == nil {
+			entries = append(entries, entry)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		errs = multierror.Append(errs, err)
+	}
+	if err := r.Close(); err != nil {
+		errs = multierror.Append(errs, err)
+	}
+
+	return entries, errs.ErrorOrNil()
+}
+
+// DataSetList issues a LIST FTP command and parses the result
+// as a zOS filesystem listing
+func (c *ServerConn) DataSetList(path string) (entries []*DataSetEntry, err error) {
+	cmd := "LIST"
+	parser := parseDataSetListLine
 
 	space := " "
 	if path == "" {
